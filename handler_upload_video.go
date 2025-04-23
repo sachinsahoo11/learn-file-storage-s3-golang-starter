@@ -1,15 +1,18 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"encoding/base64"
+	"encoding/json"
 	"fmt"
 	"io"
 	"log"
 	"mime"
 	"net/http"
 	"os"
+	"os/exec"
 	"strings"
 
 	"github.com/aws/aws-sdk-go-v2/service/s3"
@@ -79,6 +82,21 @@ func (cfg *apiConfig) handlerUploadVideo(w http.ResponseWriter, r *http.Request)
 	defer tmpFile.Close()
 
 	io.Copy(tmpFile, file)
+	aspectRatio, err := getVideoAspectRatio(tmpFile.Name())
+	if err != nil {
+		respondWithError(w, http.StatusInternalServerError, "failed to get asapect ratio", err)
+		return
+	}
+
+	var folder string
+	switch aspectRatio {
+	case "16:9":
+		folder = "landscape"
+	case "9:16":
+		folder = "portrait"
+	default:
+		folder = "other"
+	}
 
 	tmpFile.Seek(0, io.SeekStart)
 
@@ -86,7 +104,7 @@ func (cfg *apiConfig) handlerUploadVideo(w http.ResponseWriter, r *http.Request)
 	rand.Read(byteVideoID)
 	stringVideoID := base64.URLEncoding.EncodeToString(byteVideoID)
 
-	videoKey := stringVideoID + "." + extension
+	videoKey := folder + "/" + stringVideoID + "." + extension
 	log.Println(videoKey)
 
 	_, err = cfg.s3Client.PutObject(context.Background(), &s3.PutObjectInput{
@@ -110,4 +128,28 @@ func (cfg *apiConfig) handlerUploadVideo(w http.ResponseWriter, r *http.Request)
 		respondWithError(w, http.StatusInternalServerError, "couldn't update videoURL", err)
 		return
 	}
+}
+
+func getVideoAspectRatio(filePath string) (string, error) {
+	cmd := exec.Command("ffprobe", "-v", "error", "-print_format", "json", "-show_streams", filePath)
+	streamBuffer := &bytes.Buffer{}
+	cmd.Stdout = streamBuffer
+	err := cmd.Run()
+	if err != nil {
+		return "", err
+	}
+
+	type streamData struct {
+		Streams []struct {
+			DisplayAspectRatio string `json:"display_aspect_ratio,omitempty"`
+		} `json:"streams"`
+	}
+
+	var obj streamData
+	err = json.Unmarshal(streamBuffer.Bytes(), &obj)
+	if err != nil {
+		return "", err
+	}
+
+	return obj.Streams[0].DisplayAspectRatio, nil
 }
